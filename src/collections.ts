@@ -1,4 +1,4 @@
-import type { Access, CollectionBeforeChangeHook, CollectionConfig, FieldAccess, Where } from 'payload'
+import type { Access, CollectionBeforeChangeHook, CollectionConfig, CollectionSlug, FieldAccess, Where } from 'payload'
 import { generateKeyBetween } from 'payload/shared'
 
 import { managerReaches, managerScope, matchesWhere, viaMembership } from './access.js'
@@ -41,7 +41,26 @@ type Via = (w: Where) => Where
  * (`via` rewrites it for a collection that holds the rows indirectly), anything else is no. A new
  * row (`create`) must match the query in its own data.
  */
-function scopedManager(o: ResolvedMembership, via: Via = (w) => w) {
+function scopedManager(o: ResolvedMembership, via: Via = (w) => w, collection?: string) {
+  // An update by a limited manager must leave the row inside their query: the existing row with the
+  // incoming data merged over it is matched in memory, so a row can't be moved out of scope or into
+  // another site. Nothing to check unless the data touches a field the query names.
+  const update: Access = async ({ req, id, data }) => {
+    const scope = await managerScope(o, req)
+    if (scope === true) return true
+    if (!scope) return false
+    const where = via(scope)
+    if (data && collection && referencedFields(scope).some((k) => k in data)) {
+      let merged: Record<string, unknown> = data
+      if (id != null) {
+        const existing = await req.payload.findByID({ collection: collection as CollectionSlug, id, depth: 0, overrideAccess: true, disableErrors: true, req })
+        if (!existing) return false
+        merged = { ...(existing as Record<string, unknown>), ...data }
+      }
+      if (!matchesWhere(scope, merged)) return false
+    }
+    return where
+  }
   const rows =
     (): Access =>
     async ({ req }) => {
@@ -52,7 +71,12 @@ function scopedManager(o: ResolvedMembership, via: Via = (w) => w) {
     const scope = await managerScope(o, req)
     return scope === true || (scope !== null && matchesWhere(scope, data))
   }
-  return { create, update: rows(), remove: rows() }
+  return { create, update: collection ? update : rows(), remove: rows() }
+}
+
+/** Top-level field names a query mentions. */
+function referencedFields(where: Where): string[] {
+  return Object.entries(where).flatMap(([k, v]) => (k === 'and' || k === 'or' ? (v as Where[]).flatMap(referencedFields) : [k.split('.')[0]!]))
 }
 
 /** Managers read what `canManage` reaches and members their own rows; anyone else gets nothing. */
@@ -81,7 +105,7 @@ const money = (name: string, label: string, description: string) =>
   ({ name, label, type: 'number' as const, min: 0, admin: { description: `${description} In cents (e.g. 500 = 5.00).` } })
 
 export function tiersCollection(o: ResolvedMembership): CollectionConfig {
-  const { create, update, remove } = scopedManager(o)
+  const { create, update, remove } = scopedManager(o, undefined, o.tiers)
   const managerField = managerFieldOn(o, o.tiers)
   return {
     slug: o.tiers,
@@ -116,7 +140,7 @@ export function tiersCollection(o: ResolvedMembership): CollectionConfig {
 }
 
 export function categoriesCollection(o: ResolvedMembership): CollectionConfig {
-  const { create, update, remove } = scopedManager(o)
+  const { create, update, remove } = scopedManager(o, undefined, o.categories)
   const managerField = managerFieldOn(o, o.categories)
   return {
     slug: o.categories,
@@ -150,7 +174,7 @@ export function categoriesCollection(o: ResolvedMembership): CollectionConfig {
 }
 
 export function membershipsCollection(o: ResolvedMembership): CollectionConfig {
-  const { update, remove } = scopedManager(o)
+  const { update, remove } = scopedManager(o, undefined, o.memberships)
   const managerField = managerFieldOn(o, o.memberships)
   // A manager reads what `canManage` reaches; members read their own (the plugin's own query, never the site's answer).
   const ownOrManager = ownOrScoped(o)

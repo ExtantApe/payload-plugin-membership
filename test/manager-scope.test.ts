@@ -176,6 +176,34 @@ describe('a manager limited to one site by a Where', () => {
   })
 })
 
+describe('a limited manager can’t move a row out of their scope', () => {
+  const tierOf = (name: string) => payload.create({ collection: 'membership-tiers' as never, data: { name, site: 'a' } as never, overrideAccess: true }) as Promise<Doc>
+  it('refuses moving a site A tier, category or membership to site B, in the Local API and REST', async () => {
+    const t = await tierOf('Mover')
+    const c = (await payload.create({ collection: 'membership-categories' as never, data: { name: 'Mover cat', site: 'a' } as never })) as Doc
+    for (const [collection, id] of [['membership-tiers', t.id], ['membership-categories', c.id], ['memberships', mA.id]] as const) {
+      await expect(payload.update({ collection: collection as never, id, data: { site: 'b' } as never, ...as(managerA) }), collection).rejects.toThrow()
+      expect((await rest('PATCH', `/${collection}/${id}`, managerA, { body: { site: 'b' } })).status, collection).toBeGreaterThanOrEqual(403)
+      expect((await get(collection, id)).site, collection).toBe('a')
+    }
+    // A bulk update that would move rows out is refused too.
+    await expect(payload.update({ collection: 'membership-tiers' as never, where: { id: { equals: t.id } }, data: { site: 'b' } as never, ...as(managerA) })).rejects.toThrow()
+    expect((await get('membership-tiers', t.id)).site).toBe('a')
+    await payload.delete({ collection: 'membership-tiers' as never, id: t.id })
+    await payload.delete({ collection: 'membership-categories' as never, id: c.id })
+  })
+
+  it('refuses moving a site B row into site A, and still serves in-scope updates (with or without the site in the data)', async () => {
+    await expect(payload.update({ collection: 'membership-tiers' as never, id: tierB.id, data: { site: 'a' } as never, ...as(managerA) })).rejects.toThrow()
+    const t = await tierOf('Stays')
+    await expect(payload.update({ collection: 'membership-tiers' as never, id: t.id, data: { name: 'Stays 2', site: 'a' } as never, ...as(managerA) })).resolves.toMatchObject({ name: 'Stays 2', site: 'a' })
+    await expect(payload.update({ collection: 'membership-tiers' as never, id: t.id, data: { name: 'Stays 3' } as never, ...as(managerA) })).resolves.toMatchObject({ name: 'Stays 3' })
+    expect((await rest('PATCH', `/membership-tiers/${t.id}`, managerA, { body: { name: 'Stays 4', site: 'a' } })).status).toBe(200)
+    await payload.delete({ collection: 'membership-tiers' as never, id: t.id })
+    expect((await get('membership-tiers', tierB.id)).site).toBe('b')
+  })
+})
+
 describe('member endpoints with a scoped manager', () => {
   it('refuse a manager from site A on site B’s membership, whatever site they ask from', async () => {
     const before = calls.length

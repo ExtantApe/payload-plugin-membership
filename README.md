@@ -113,9 +113,10 @@ canManage: ({ req }) => {
 A manager limited by a `Where` reaches only the matching memberships, payments, tiers and categories:
 list, read, edit, delete, REST and GraphQL alike, and the endpoints below. A new tier or category
 must match the `Where` in its own data. The plugin checks `equals`, `not_equals`, `in`, `not_in`,
-`exists`, `and` and `or` there; any other operator is a no for a create. Updating an existing row is
-checked against the stored row, so a limited manager can still change a row's own scope field if your
-collection lets them. Make that field read-only for managers if you need to stop it.
+`exists`, `and` and `or` there; any other operator is a no for a create. An update that names a
+field your `Where` uses is checked the same way, on the stored row with the new data merged over it, so
+a limited manager can't move a row out of their scope or into another one. An update that leaves those
+fields alone isn't checked again.
 
 `notes`, `stripe` and `stripeProduct` are judged row by row with the same answer, so a manager of
 site A never reads site B's notes or Stripe ids, even in a list that includes site B's rows (for
