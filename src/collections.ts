@@ -34,6 +34,22 @@ const placeAlphabetically =
     return data
   }
 
+/** No write through the API for anyone: only the plugin's own server code (with overrideAccess) changes these. */
+const LOCKED = { update: () => false }
+
+/** Only the member whose row it is. */
+const memberOnly: FieldAccess = ({ req, doc }) => Boolean(req.user) && String(idOf((doc as { user?: unknown } | undefined)?.user)) === String(req.user!.id)
+
+/** Only the member sets `wall.show` to true; a manager may only hide (`false`), e.g. for an offensive name or a takedown request. */
+const wallShow = (o: ResolvedMembership): FieldAccess => async (args) => {
+  if (await memberOnly(args)) return true
+  if ((args.siblingData as { show?: unknown } | undefined)?.show !== false) return false
+  const scope = await managerScope(o, args.req)
+  if (scope === true) return true
+  const id = args.id ?? (args.doc as { id?: unknown } | undefined)?.id
+  return Boolean(scope) && id != null && managerReaches(o, args.req, o.memberships, id)
+}
+
 type Via = (w: Where) => Where
 
 /**
@@ -87,6 +103,15 @@ function ownOrScoped(o: ResolvedMembership, via: Via = (w) => w): Access {
     const scope = await managerScope(o, req)
     if (scope === true) return true
     return scope ? ({ or: [via(scope), own] } satisfies Where) : own
+  }
+}
+
+/** A relationship may only be set to a row the manager reaches (nothing to check when it isn't being set). */
+function inScope(o: ResolvedMembership, target: string): FieldAccess {
+  return async ({ req, siblingData, data }) => {
+    const sent = (siblingData as Record<string, unknown> | undefined)?.parent ?? (data as Record<string, unknown> | undefined)?.parent
+    if (sent == null || sent === '') return true
+    return managerReaches(o, req, target, idOf(sent))
   }
 }
 
@@ -157,7 +182,7 @@ export function categoriesCollection(o: ResolvedMembership): CollectionConfig {
     fields: [
       { name: 'name', type: 'text', required: true },
       { name: 'active', label: 'Open to new pledges', type: 'checkbox', defaultValue: true, admin: { position: 'sidebar' } },
-      { name: 'parent', type: 'relationship', relationTo: o.categories as never, admin: { position: 'sidebar', description: 'Optional: nest under a broader category.' } },
+      { name: 'parent', type: 'relationship', relationTo: o.categories as never, access: { create: inScope(o, o.categories), update: inScope(o, o.categories) }, admin: { position: 'sidebar', description: 'Optional: nest under a broader category.' } },
       { name: 'description', type: 'textarea' },
       money('minimum', 'Minimum per month', 'Smallest monthly amount for this category (yearly: 12×).'),
       {
@@ -190,28 +215,30 @@ export function membershipsCollection(o: ResolvedMembership): CollectionConfig {
     // Created by checkout and updated by Stripe webhooks; members manage theirs through the plugin's endpoints.
     access: { read: ownOrManager, create: nobody, update, delete: remove },
     fields: [
-      { name: 'label', type: 'text', admin: { readOnly: true } },
-      { name: 'user', type: 'relationship', relationTo: o.users as never, required: true, index: true, admin: { readOnly: true } },
+      { name: 'label', type: 'text', access: LOCKED, admin: { readOnly: true } },
+      { name: 'user', type: 'relationship', relationTo: o.users as never, required: true, index: true, access: LOCKED, admin: { readOnly: true } },
       {
         type: 'row',
         fields: [
-          { name: 'kind', type: 'select', required: true, options: [{ label: 'Tier', value: 'tier' }, { label: 'Pledge to categories', value: 'pledge' }], admin: { width: '33%', readOnly: true } },
+          { name: 'kind', type: 'select', required: true, options: [{ label: 'Tier', value: 'tier' }, { label: 'Pledge to categories', value: 'pledge' }], access: LOCKED, admin: { width: '33%', readOnly: true } },
           {
             name: 'status',
             type: 'select',
             required: true,
             defaultValue: 'pending',
             index: true,
+            access: LOCKED,
             options: ['pending', 'incomplete', 'active', 'past_due', 'canceled'].map((v) => ({ label: v.replace('_', ' '), value: v })),
             admin: { width: '33%', readOnly: true },
           },
-          { name: 'interval', type: 'select', required: true, options: [{ label: 'Monthly', value: 'month' }, { label: 'Yearly', value: 'year' }], admin: { width: '34%', readOnly: true } },
+          { name: 'interval', type: 'select', required: true, options: [{ label: 'Monthly', value: 'month' }, { label: 'Yearly', value: 'year' }], access: LOCKED, admin: { width: '34%', readOnly: true } },
         ],
       },
-      { name: 'tier', type: 'relationship', relationTo: o.tiers as never, index: true, admin: { readOnly: true, condition: (d) => d?.kind === 'tier' } },
+      { name: 'tier', type: 'relationship', relationTo: o.tiers as never, index: true, access: LOCKED, admin: { readOnly: true, condition: (d) => d?.kind === 'tier' } },
       {
         name: 'pledges',
         type: 'array',
+        access: LOCKED,
         admin: { readOnly: true, condition: (d) => d?.kind === 'pledge' },
         fields: [
           { name: 'category', type: 'relationship', relationTo: o.categories as never, required: true, index: true },
@@ -221,8 +248,8 @@ export function membershipsCollection(o: ResolvedMembership): CollectionConfig {
       {
         type: 'row',
         fields: [
-          { name: 'amount', type: 'number', required: true, min: 0, admin: { width: '33%', readOnly: true, description: 'Per interval, in cents.' } },
-          { name: 'currency', type: 'text', required: true, admin: { width: '33%', readOnly: true } },
+          { name: 'amount', type: 'number', required: true, min: 0, access: LOCKED, admin: { width: '33%', readOnly: true, description: 'Per interval, in cents.' } },
+          { name: 'currency', type: 'text', required: true, access: LOCKED, admin: { width: '33%', readOnly: true } },
           {
             name: 'totalPaid',
             type: 'number',
@@ -247,10 +274,10 @@ export function membershipsCollection(o: ResolvedMembership): CollectionConfig {
       {
         type: 'row',
         fields: [
-          { name: 'startedAt', type: 'date', admin: { width: '25%', readOnly: true } },
-          { name: 'currentPeriodEnd', type: 'date', admin: { width: '25%', readOnly: true } },
-          { name: 'cancelAtPeriodEnd', type: 'checkbox', admin: { width: '25%', readOnly: true } },
-          { name: 'canceledAt', type: 'date', admin: { width: '25%', readOnly: true } },
+          { name: 'startedAt', type: 'date', access: LOCKED, admin: { width: '25%', readOnly: true } },
+          { name: 'currentPeriodEnd', type: 'date', access: LOCKED, admin: { width: '25%', readOnly: true } },
+          { name: 'cancelAtPeriodEnd', type: 'checkbox', access: LOCKED, admin: { width: '25%', readOnly: true } },
+          { name: 'canceledAt', type: 'date', access: LOCKED, admin: { width: '25%', readOnly: true } },
         ],
       },
       {
@@ -259,15 +286,15 @@ export function membershipsCollection(o: ResolvedMembership): CollectionConfig {
         type: 'group',
         admin: { description: 'Members choose whether and how they appear; nothing is public otherwise.' },
         fields: [
-          { name: 'show', label: 'Show on the backers wall', type: 'checkbox', defaultValue: false },
-          { name: 'name', label: 'Name on the wall', type: 'text', maxLength: 80 },
+          { name: 'show', label: 'Show on the backers wall', type: 'checkbox', defaultValue: false, access: { update: wallShow(o) } },
+          { name: 'name', label: 'Name on the wall', type: 'text', maxLength: 80, access: { update: memberOnly } },
         ],
       },
       // Stripe references: managers only, never in public responses.
       {
         name: 'stripe',
         type: 'group',
-        access: { read: managerField, create: managerField, update: managerField },
+        access: { read: managerField, create: LOCKED.update, update: LOCKED.update },
         admin: { position: 'sidebar', readOnly: true },
         fields: [
           { name: 'customer', type: 'text', index: true },

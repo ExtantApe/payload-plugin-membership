@@ -65,7 +65,7 @@ In Stripe, add a webhook endpoint `https://<your site>/api/memberships/stripe-we
 | `POST /api/memberships/:id/change` | `{ tier }` or `{ pledges }` | the updated membership (from the next invoice) |
 | `POST /api/memberships/:id/cancel` | | cancels at the end of the paid period |
 | `POST /api/memberships/:id/portal` | `{ returnPath? }` | `{ url }` of Stripe's customer portal |
-| `POST /api/memberships/:id/wall` | `{ show, name }` | the member's backers-wall choice |
+| `POST /api/memberships/:id/wall` | `{ show, name }` | the member's backers-wall choice. A manager may only send `show: false` |
 
 Amounts are in cents. Server code can call `startCheckout`, `changeMembership`, `cancelMembership`,
 `portalLink`, `myMembership` and `getBackers` directly.
@@ -96,8 +96,13 @@ Amounts are in cents. Server code can call `startCheckout`, `changeMembership`, 
   against the memberships collection and the `scopeField` of tiers and categories. For payments the
   plugin applies it through each payment's `membership`.
 - Anything else is no: `false`, `null`, `0`, `''`, `1`, `'yes'`, an array, an empty `{}` or `{ and: [] }`,
-  a field with no operator, or an error thrown or rejected. An error doesn't escape as a 500; the request
-  is refused. An empty `{}` would match every row, so it is a no. Return `true` to mean all.
+  a field with no operator, an operator Payload doesn't have or the plugin doesn't take (a typo such as
+  `equal` included), a value that would match every row (`like: ''`, `contains: ''`, `not_in: []`,
+  `all: []`), a query that doesn't run against the memberships collection (an unknown field), or an
+  error thrown or rejected. The request is refused cleanly, never a 500. An empty `{}` would match
+  every row, so it is a no. Return `true` to mean all. The accepted operators are `equals`,
+  `not_equals`, `in`, `not_in`, `all`, `exists`, `greater_than`, `greater_than_equal`, `less_than`,
+  `less_than_equal`, `like` and `contains`. `in: []` is accepted and matches nothing.
 
 Nobody who isn't signed in is a manager, whatever `canManage` says.
 
@@ -129,12 +134,21 @@ example a membership they hold as a member there).
 | Memberships | Reads and edits within their scope, deletes within their scope | Reads their own | Nothing |
 | A membership's `stripe` and `notes` (fields) | Reads and writes within their scope | Never sees them | Nothing |
 | Payments | Reads and deletes within their scope | Reads their own | Nothing |
-| `cancel`, `wall` endpoints | A membership within their scope, on this request's site | Their own | 404 |
+| `cancel` endpoint | A membership within their scope, on this request's site | Their own | 404 |
+| `wall` endpoint | Only to hide (`show: false`), within their scope | Their own, show and name | 404 |
 | `change`, `portal` endpoints | Never | Their own | 404 |
 
-Only the member changes their own plan or opens their own Stripe billing portal. A manager, even
-one who manages everything, gets a 404 on `change` and `portal`. Managers keep `cancel`.
-(Decided 2026-11-23.)
+Only the member changes their own plan, opens their own Stripe billing portal, shows themselves on the
+backers wall or sets the wall name. A manager, even one who manages everything, gets a 404 on `change`
+and `portal`, and may only hide a wall entry (`show: false`, for an offensive name or a takedown
+request). Managers keep `cancel`. (Decided 2026-11-23.)
+
+This is enforced in field access too, not just in the endpoints, so editing a membership through
+Payload's own REST, GraphQL or admin can't get around it. A manager can't write a membership's `user`,
+`kind`, `status`, `interval`, `tier`, `pledges`, `amount`, `currency`, `label`, the period dates or the
+`stripe` group, or `wall.name`, and can only set `wall.show` to `false`. Only `notes` is theirs to edit.
+Server code that writes with `overrideAccess` (checkout, Stripe events) is unchanged. A manager can
+set a category's `parent` only to a category in their scope.
 
 Nobody creates memberships or payments directly: checkout and Stripe do. The member endpoints answer
 404, not 403, to anyone who may not use them, so they don't say whether a membership exists.

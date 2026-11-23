@@ -204,6 +204,110 @@ describe('a limited manager can’t move a row out of their scope', () => {
   })
 })
 
+describe('what a manager answer can’t get around (review of 2026-11-23)', () => {
+  const answering = async (fn: (u: Doc) => unknown, body: () => Promise<void>) => {
+    const was = answer
+    answer = fn
+    try {
+      await body()
+    } finally {
+      answer = was
+    }
+  }
+  const seenBy = async (u: Doc) => ((await payload.find({ collection: 'memberships' as never, depth: 0, pagination: false, ...as(u) })).docs as Doc[]).map((d) => d.site)
+
+  it('refuses a misspelled or unknown operator on every write, instead of ignoring it', async () => {
+    for (const where of [{ site: { equal: 'a' } }, { site: { bogus: 'a' } }, { site: { equals: 'a', bogus: 'a' } }, { and: [{ site: { equal: 'a' } }] }, { site: { near: [1, 2] } }])
+      await answering(() => where, async () => {
+        const label = JSON.stringify(where)
+        await expect(payload.update({ collection: 'memberships' as never, id: mB.id, data: { notes: 'cross' } as never, ...as(managerA) }), label).rejects.toThrow()
+        await expect(payload.update({ collection: 'memberships' as never, where: { id: { exists: true } }, data: { notes: 'cross' } as never, ...as(managerA) }), label).rejects.toThrow()
+        await expect(payload.delete({ collection: 'membership-payments' as never, id: (await payB()).id, ...as(managerA) }), label).rejects.toThrow()
+        expect((await rest('PATCH', `/memberships/${mB.id}`, managerA, { body: { notes: 'cross' } })).status, label).toBe(403)
+        expect((await rest('DELETE', `/membership-payments/${(await payB()).id}`, managerA)).status, label).toBe(403)
+        expect(await seenBy(managerA), label).toEqual([])
+      })
+    expect((await get('memberships', mB.id)).notes).toBe('note b')
+    expect((await payB()).invoiceId).toBe('in_b1')
+  })
+
+  it('refuses values that would match every row (empty text, empty not_in), and bad shapes, with a clean refusal', async () => {
+    const bad = [{ site: { like: '' } }, { site: { contains: '' } }, { site: { not_in: [] } }, { site: { all: [] } }, { site: { equals: {} } }, { site: { exists: 'yes' } }, { nope: { equals: 'a' } }, { site: { in: [{}] } }]
+    for (const where of bad)
+      await answering(() => where, async () => {
+        const label = JSON.stringify(where)
+        await expect(payload.update({ collection: 'memberships' as never, id: mB.id, data: { notes: 'cross' } as never, ...as(managerA) }), label).rejects.toThrow()
+        expect(await seenBy(managerA), label).toEqual([])
+        for (const r of [await rest('PATCH', `/memberships/${mB.id}`, managerA, { body: { notes: 'cross' } }), await rest('POST', `/memberships/${mB.id}/cancel`, managerA, { site: 'b' }), await rest('GET', '/memberships?depth=0', managerA)])
+          expect(r.status, label).toBeLessThan(500)
+        expect((await rest('PATCH', `/memberships/${mB.id}`, managerA, { body: { notes: 'cross' } })).status, label).toBe(403)
+        expect((await rest('POST', `/memberships/${mB.id}/cancel`, managerA, { site: 'b' })).status, label).toBe(404)
+      })
+    expect((await get('memberships', mB.id)).notes).toBe('note b')
+    // An empty list for `in` matches nothing, so it is allowed and shows nothing.
+    await answering(() => ({ site: { in: [] } }), async () => expect(await seenBy(managerA)).toEqual([]))
+    await answering(() => ({ site: { in: ['a'] } }), async () => expect(await seenBy(managerA)).toEqual(['a']))
+  })
+
+  it('gives managers no write access on the member, Stripe ids, plan, status, amounts or dates', async () => {
+    const before = await get('memberships', mA.id)
+    const attempt = { user: managerA.id, stripe: { customer: 'cus_sub_b', subscription: 'sub_b' }, kind: 'pledge', status: 'canceled', amount: 1, currency: 'eur', interval: 'year', tier: tierB.id, pledges: [{ category: tierB.id, amount: 1 }], startedAt: '2001-01-01T00:00:00.000Z', currentPeriodEnd: '2001-01-01T00:00:00.000Z', cancelAtPeriodEnd: true, canceledAt: '2001-01-01T00:00:00.000Z', label: 'renamed', notes: 'allowed note' }
+    for (const who of [managerA, adminAll]) {
+      await payload.update({ collection: 'memberships' as never, id: mA.id, data: attempt as never, ...as(who) })
+      const after = await get('memberships', mA.id)
+      for (const k of ['user', 'kind', 'status', 'amount', 'currency', 'interval', 'tier', 'startedAt', 'currentPeriodEnd', 'cancelAtPeriodEnd', 'canceledAt', 'label'])
+        expect(after[k], `${k} by ${who.role}`).toEqual(before[k])
+      expect(after.stripe).toEqual(before.stripe)
+      expect(after.pledges).toEqual(before.pledges)
+      expect(after.notes).toBe('allowed note')
+    }
+    const patched = await rest('PATCH', `/memberships/${mA.id}`, managerA, { body: { user: managerA.id, stripe: { subscription: 'sub_b' } } })
+    expect(patched.status).toBeLessThan(500)
+    expect(String((await get('memberships', mA.id)).user)).toBe(String(memberA.id))
+    // So the manager is still not the member: no portal, no plan change.
+    const before2 = calls.length
+    for (const action of ['portal', 'change']) expect((await rest('POST', `/memberships/${mA.id}/${action}`, managerA, { site: 'a', body: { tier: String(tierA.id) } })).status, action).toBe(404)
+    expect(calls.slice(before2)).toEqual([])
+    await payload.update({ collection: 'memberships' as never, id: mA.id, data: { notes: 'note a' } as never })
+  })
+
+  it('lets only the member show the wall name; a manager may only hide it', async () => {
+    await payload.update({ collection: 'memberships' as never, id: mA.id, data: { wall: { show: true, name: 'A backer' } } as never })
+    for (const who of [managerA, adminAll]) {
+      await payload.update({ collection: 'memberships' as never, id: mA.id, data: { wall: { show: true, name: 'Renamed by staff' } } as never, ...as(who) })
+      expect((await get('memberships', mA.id)).wall, who.role).toEqual({ show: true, name: 'A backer' })
+    }
+    expect((await rest('PATCH', `/memberships/${mA.id}`, managerA, { body: { wall: { name: 'Renamed by staff' } } })).status).toBeLessThan(500)
+    expect((await get('memberships', mA.id)).wall.name).toBe('A backer')
+    await payload.update({ collection: 'memberships' as never, id: mA.id, data: { wall: { show: false, name: 'A backer' } } as never, ...as(managerA) })
+    expect((await get('memberships', mA.id)).wall).toEqual({ show: false, name: 'A backer' })
+    // Showing it again by a manager is ignored; the member's own endpoint does it.
+    await payload.update({ collection: 'memberships' as never, id: mA.id, data: { wall: { show: true } } as never, ...as(managerA) })
+    expect((await get('memberships', mA.id)).wall.show).toBe(false)
+    expect((await rest('POST', `/memberships/${mA.id}/wall`, memberA, { site: 'a', body: { show: true, name: 'Mine' } })).status).toBe(200)
+    expect((await get('memberships', mA.id)).wall).toEqual({ show: true, name: 'Mine' })
+    // A manager of another site can't even hide it.
+    await payload.update({ collection: 'memberships' as never, id: mB.id, data: { wall: { show: true, name: 'B backer' } } as never })
+    await payload.update({ collection: 'memberships' as never, id: mB.id, data: { wall: { show: false } } as never, ...as(managerA) }).then(() => undefined, () => undefined)
+    expect((await get('memberships', mB.id)).wall.show).toBe(true)
+    await payload.update({ collection: 'memberships' as never, id: mB.id, data: { wall: { show: false, name: null } } as never })
+  })
+
+  it('refuses pointing a category’s parent at another site’s category', async () => {
+    const mk = (name: string, site: string, extra: Doc = {}) => payload.create({ collection: 'membership-categories' as never, data: { name, site, ...extra } as never }) as Promise<Doc>
+    const parentB = await mk('Parent B', 'b')
+    const parentA = await mk('Parent A', 'a')
+    const child = await mk('Child', 'a')
+    await payload.update({ collection: 'membership-categories' as never, id: child.id, data: { parent: parentB.id } as never, ...as(managerA) })
+    expect((await get('membership-categories', child.id)).parent ?? null).toBeNull()
+    const created = await payload.create({ collection: 'membership-categories' as never, data: { name: 'New child', site: 'a', parent: parentB.id } as never, ...as(managerA) })
+    expect((created as Doc).parent ?? null).toBeNull()
+    await payload.update({ collection: 'membership-categories' as never, id: child.id, data: { parent: parentA.id } as never, ...as(managerA) })
+    expect(String((await get('membership-categories', child.id)).parent)).toBe(String(parentA.id))
+    for (const d of [child, parentA, parentB, created as Doc]) await payload.delete({ collection: 'membership-categories' as never, id: d.id })
+  })
+})
+
 describe('member endpoints with a scoped manager', () => {
   it('refuse a manager from site A on site B’s membership, whatever site they ask from', async () => {
     const before = calls.length
@@ -301,5 +405,17 @@ describe('the answers of canManage', () => {
   it('leaves nothing behind but what the tests made, and the fake Stripe saw no portal for managers', async () => {
     expect(calls.filter((c) => c.what === 'portal').map((c) => c.params.customer)).toEqual(['cus_sub_a'])
     expect((await payA()).invoiceId).toBe('in_a1')
+  })
+})
+
+describe('the wall endpoint for managers', () => {
+  it('lets a manager only hide an entry, and never show it or rename it', async () => {
+    await payload.update({ collection: 'memberships' as never, id: mA.id, data: { wall: { show: true, name: 'A backer' } } as never })
+    expect((await rest('POST', `/memberships/${mA.id}/wall`, managerA, { site: 'a', body: { show: true, name: 'Staff name' } })).status).toBe(403)
+    expect((await rest('POST', `/memberships/${mA.id}/wall`, adminAll, { site: 'a', body: { name: 'Staff name' } })).status).toBe(403)
+    expect((await get('memberships', mA.id)).wall).toEqual({ show: true, name: 'A backer' })
+    expect((await rest('POST', `/memberships/${mA.id}/wall`, managerA, { site: 'a', body: { show: false, name: 'Staff name' } })).status).toBe(200)
+    expect((await get('memberships', mA.id)).wall).toEqual({ show: false, name: 'A backer' })
+    await payload.update({ collection: 'memberships' as never, id: mA.id, data: { wall: { show: false, name: null } } as never })
   })
 })

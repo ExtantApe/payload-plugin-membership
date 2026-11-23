@@ -8,6 +8,9 @@
 - Only an exact `true` or a usable `Where` counts. `null`, `0`, `''`, `{}`, `{ and: [] }`, arrays, a field with no operator, a throw and a rejection are all no. An empty `{}` is no because it would match every row; return `true` to mean all.
 - A new tier or category from a limited manager must match their `Where` in its own data (`equals`, `not_equals`, `in`, `not_in`, `exists`, `and`, `or`; any other operator is a no).
 - An update by a limited manager is matched in memory against the stored row with the new data merged in, so a row can't be moved out of scope or into another site (memberships, tiers, categories; payments aren't writable).
+- Only known operators count in a `Where` (`equals`, `not_equals`, `in`, `not_in`, `all`, `exists`, the four comparisons, `like`, `contains`). A typo such as `equal` used to be ignored by Payload on writes, so a manager could write across sites; it is now a no. Values that match every row (`like: ''`, `contains: ''`, `not_in: []`, `all: []`) are refused, and a Where must run against the memberships collection once (a throw is a no), so a bad answer is a clean refusal, never a 500.
+- Managers can no longer write a membership's `user`, `kind`, `status`, `interval`, `tier`, `pledges`, `amount`, `currency`, `label`, period dates or `stripe` group (field access), which closed a way around member-only `portal` and `change` and a way to reach another site's Stripe objects. A manager can set a category's `parent` only to a category in their scope.
+- Wall (owner decision, 2026-11-23: member only, managers may hide): only the member sets `wall.show` to true or changes `wall.name`; a manager may only set `show: false`. Field access and the `wall` endpoint both enforce it.
 - Field access for `notes`, `stripe` and `stripeProduct` is judged on the row, not on a bare yes.
 - `change` and `portal` are for the member only. A manager now gets a 404 on both; `cancel` stays. Owner decision, 2026-11-23.
 - The `cancel` and `wall` endpoints still go through the collection's own read access for a manager, so rules the host added there also apply.
@@ -15,7 +18,7 @@
 ### Tested
 
 - New `test/manager-scope.test.ts` against an in-memory MongoDB with no tenant plugin and a fake Stripe: a manager limited to site A is refused on site B for read, find, update, delete and create, on memberships, payments, tiers and notes and Stripe fields, through the Local API (access on) and REST (list, read, PATCH, DELETE); is served on site A; the `cancel` and `wall` endpoints refuse across sites; `change` and `portal` are member only, for a site manager and for an all-rows manager; `true`, a matching `Where`, a `Where` that matches nothing, an `or` query and an unsupported create operator; all the no answers listed above.
-- Existing suites updated for member-only `change` and `portal`. 61 tests, run three times, plus typecheck and the leak check.
+- Existing suites updated for member-only `change` and `portal`. 69 tests, run three times, plus typecheck and the leak check.
 
 ### Not tested
 

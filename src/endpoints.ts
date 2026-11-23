@@ -130,7 +130,7 @@ export const portalEndpoint: Endpoint = {
   },
 }
 
-/** POST /api/<memberships>/:id/wall { show, name }: the member's own choice for the backers wall. */
+/** POST /api/<memberships>/:id/wall { show, name }: the member's own choice for the backers wall. A manager may only send `show: false`. */
 export const wallEndpoint: Endpoint = {
   path: '/:id/wall',
   method: 'post',
@@ -138,11 +138,14 @@ export const wallEndpoint: Endpoint = {
     const m = await ownMembership(req)
     if (!m) return json({ error: 'Not found.' }, 404)
     const b = await body(req)
-    const name = typeof b.name === 'string' ? b.name.trim().slice(0, 80) : ''
+    const member = idOf(m.user) === String(req.user!.id)
+    // Only the member shows themselves on the wall or changes the name; a manager may only hide it.
+    if (!member && b.show !== false) return json({ error: 'Only the member can do that.' }, 403)
+    const name = member ? (typeof b.name === 'string' ? b.name.trim().slice(0, 80) : '') : ((m as { wall?: { name?: string | null } }).wall?.name ?? '')
     const updated = await req.payload.update({
       collection: membershipOf(req.payload).memberships as CollectionSlug,
       id: m.id,
-      data: { wall: { show: Boolean(b.show) && Boolean(name), name: name || null } } as never,
+      data: { wall: { show: member ? Boolean(b.show) && Boolean(name) : false, name: name || null } } as never,
       overrideAccess: true,
       context: { membershipSync: true },
     })

@@ -17,10 +17,35 @@ const isPlain = (v: unknown): v is Record<string, unknown> => {
   return proto === Object.prototype || proto === null
 }
 
+const scalar = (v: unknown) => v === null || ['string', 'number', 'boolean'].includes(typeof v)
+const scalars = (v: unknown, minimum: number) => Array.isArray(v) && v.length >= minimum && v.every(scalar)
+const nonEmptyText = (v: unknown) => typeof v === 'string' && v.length > 0
+const number = (v: unknown) => typeof v === 'number' || typeof v === 'string'
+
+/**
+ * The operators the plugin accepts, each with a check on its value. An unknown operator (a typo
+ * such as `equal`) is refused rather than ignored, because Payload ignores some unknown operators
+ * on writes. Values that would match every row, such as an empty `like` or an empty `not_in`, are refused.
+ */
+const OPERATORS: Record<string, (v: unknown) => boolean> = {
+  equals: scalar,
+  not_equals: scalar,
+  in: (v) => scalars(v, 0), // an empty list matches nothing
+  not_in: (v) => scalars(v, 1),
+  all: (v) => scalars(v, 1),
+  exists: (v) => typeof v === 'boolean',
+  greater_than: number,
+  greater_than_equal: number,
+  less_than: number,
+  less_than_equal: number,
+  like: nonEmptyText,
+  contains: nonEmptyText,
+}
+
 /**
  * A usable query: a plain object with at least one key, where `and`/`or` hold non-empty lists of
- * usable queries and every field key holds a non-empty plain object of operators. `{}` matches every
- * row, so it is not usable: a host that means "all" returns `true`.
+ * usable queries and every field key holds a non-empty plain object of known operators with
+ * sensible values. `{}` matches every row, so it is not usable: a host that means "all" returns `true`.
  */
 export function usableWhere(w: unknown, depth = 0): w is Where {
   if (!isPlain(w) || depth > 8) return false
@@ -29,30 +54,46 @@ export function usableWhere(w: unknown, depth = 0): w is Where {
   return keys.every((k) => {
     const v = w[k]
     if (k === 'and' || k === 'or') return Array.isArray(v) && v.length > 0 && v.every((x) => usableWhere(x, depth + 1))
-    return isPlain(v) && Object.keys(v).length > 0
+    if (!isPlain(v)) return false
+    const ops = Object.entries(v)
+    return ops.length > 0 && ops.every(([op, arg]) => Object.hasOwn(OPERATORS, op) && OPERATORS[op]!(arg))
   })
 }
 
 /**
  * What a manager may reach: `true` (everything), a query (only the rows it matches), or `null` (nothing).
- * Only an exact `true` or a usable query counts. Everything else, a throw or rejection included,
+ * Only an exact `true` or a usable query counts, and a query must also run against the memberships
+ * collection (an unknown field makes it a no). Everything else, a throw or rejection included,
  * and anyone not signed in, is `null`.
  */
 export type ManagerScope = true | Where | null
 
-export async function managerScope(o: Pick<ResolvedMembership, 'canManage'>, req: PayloadRequest): Promise<ManagerScope> {
+export async function managerScope(o: Pick<ResolvedMembership, 'canManage' | 'memberships'>, req: PayloadRequest): Promise<ManagerScope> {
   if (!req.user) return null
   try {
     const answer: unknown = await o.canManage({ req })
     if (answer === true) return true
-    return usableWhere(answer) ? answer : null
+    if (!usableWhere(answer)) return null
+    const checked = ((req.context as Record<string, unknown>).membershipWhereChecked ??= new Map<string, boolean>()) as Map<string, boolean>
+    const key = JSON.stringify(answer)
+    let ok = checked.get(key)
+    if (ok === undefined) {
+      try {
+        await req.payload.count({ collection: o.memberships as CollectionSlug, where: answer, overrideAccess: true, req })
+        ok = true
+      } catch {
+        ok = false
+      }
+      checked.set(key, ok)
+    }
+    return ok ? answer : null
   } catch {
     return null
   }
 }
 
 /** A manager of anything at all (a scope or all): for callers that go on to check a particular row. */
-export async function isManager(o: Pick<ResolvedMembership, 'canManage'>, req: PayloadRequest): Promise<boolean> {
+export async function isManager(o: Pick<ResolvedMembership, 'canManage' | 'memberships'>, req: PayloadRequest): Promise<boolean> {
   return (await managerScope(o, req)) !== null
 }
 
@@ -103,7 +144,7 @@ export function matchesWhere(where: Where, data: Record<string, unknown> | undef
  * (checked against the database), nobody else. The answer is kept for the request.
  */
 export async function managerReaches(
-  o: Pick<ResolvedMembership, 'canManage'>,
+  o: Pick<ResolvedMembership, 'canManage' | 'memberships'>,
   req: PayloadRequest,
   collection: string,
   id: unknown,
