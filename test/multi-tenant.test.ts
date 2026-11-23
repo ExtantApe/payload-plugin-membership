@@ -270,8 +270,8 @@ describe('member endpoints', () => {
   it('still serve the owner and their own site’s manager', async () => {
     const own = await rest('POST', `/memberships/${membershipA.id}/portal`, memberA, { site: 'a', body: { returnPath: '/account' } })
     expect(own).toMatchObject({ status: 200, body: { url: 'https://portal.example/cus_sub_a' } })
-    const manager = await rest('POST', `/memberships/${membershipB.id}/portal`, managerB, { site: 'b' })
-    expect(manager).toMatchObject({ status: 200, body: { url: 'https://portal.example/cus_sub_b' } })
+    // The site's own manager may cancel but not open the member's portal or change their plan.
+    for (const action of ['portal', 'change']) expect((await rest('POST', `/memberships/${membershipB.id}/${action}`, managerB, { site: 'b', body: { tier: String(tierB.id) } })).status, action).toBe(404)
   })
 
   it('checkout refuses another site’s tiers and categories, and refuses when the site is unknown', async () => {

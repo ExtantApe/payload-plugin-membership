@@ -76,7 +76,7 @@ Amounts are in cents. Server code can call `startCheckout`, `changeMembership`, 
 |---|---|---|
 | `slugs` | `membership-tiers`, `membership-categories`, `memberships`, `membership-payments` | |
 | `users` | `admin.user` | The members' auth collection |
-| `canManage` | nobody | Who manages tiers, categories and memberships in the admin. Only `true` counts: see [Access](#access) |
+| `canManage` | nobody | Who manages tiers, categories and memberships in the admin: `true`, or a `Where` for one site's rows. See [Access](#access) |
 | `canCheckout` | always | E.g. off in development. Only `true` allows a checkout |
 | `stripeSecretKey` / `stripe` | | Key, or a ready client (tests) |
 | `webhookSecret` | | Signing secret of the webhook endpoint |
@@ -89,28 +89,62 @@ Amounts are in cents. Server code can call `startCheckout`, `changeMembership`, 
 
 ## Access
 
-`canManage` decides everything a manager can do, and only an answer of exactly `true` counts.
-Anything else is a no: `false`, `1`, `'yes'`, an object, or an error thrown or rejected. An error
-doesn't escape as a 500; the request is refused. Nobody who isn't signed in is a manager, whatever
-`canManage` says.
+`canManage` decides everything a manager can do. It gets `{ req }` and answers one of three things:
+
+- `true`: a manager of every row.
+- A `Where`, such as `{ tenant: { equals: siteId } }`: a manager of only the rows it matches. Write it
+  against the memberships collection and the `scopeField` of tiers and categories. For payments the
+  plugin applies it through each payment's `membership`.
+- Anything else is no: `false`, `null`, `0`, `''`, `1`, `'yes'`, an array, an empty `{}` or `{ and: [] }`,
+  a field with no operator, or an error thrown or rejected. An error doesn't escape as a 500; the request
+  is refused. An empty `{}` would match every row, so it is a no. Return `true` to mean all.
+
+Nobody who isn't signed in is a manager, whatever `canManage` says.
+
+```ts
+canManage: ({ req }) => {
+  const user = req.user as { role?: string; site?: string } | null
+  if (user?.role === 'admin') return true
+  if (user?.role === 'manager' && user.site) return { site: { equals: user.site } }
+  return false
+}
+```
+
+A manager limited by a `Where` reaches only the matching memberships, payments, tiers and categories:
+list, read, edit, delete, REST and GraphQL alike, and the endpoints below. A new tier or category
+must match the `Where` in its own data. The plugin checks `equals`, `not_equals`, `in`, `not_in`,
+`exists`, `and` and `or` there; any other operator is a no for a create. Updating an existing row is
+checked against the stored row, so a limited manager can still change a row's own scope field if your
+collection lets them. Make that field read-only for managers if you need to stop it.
+
+`notes`, `stripe` and `stripeProduct` are judged row by row with the same answer, so a manager of
+site A never reads site B's notes or Stripe ids, even in a list that includes site B's rows (for
+example a membership they hold as a member there).
 
 | Where | A manager | A signed-in member | Signed out |
 |---|---|---|---|
-| Tiers, categories | Reads, creates, edits, deletes | Reads | Reads |
-| Their `stripeProduct` (field) | Reads and writes | Never sees it | Never sees it |
-| Memberships | Reads all, edits, deletes | Reads their own | Nothing |
-| A membership's `stripe` and `notes` (fields) | Reads and writes | Never sees them | Nothing |
-| Payments | Reads all, deletes | Reads their own | Nothing |
-| `change`, `cancel`, `portal`, `wall` endpoints | Any membership on their site | Their own | 404 |
+| Tiers, categories | Reads; creates, edits, deletes within their scope | Reads | Reads |
+| Their `stripeProduct` (field) | Reads and writes within their scope | Never sees it | Never sees it |
+| Memberships | Reads and edits within their scope, deletes within their scope | Reads their own | Nothing |
+| A membership's `stripe` and `notes` (fields) | Reads and writes within their scope | Never sees them | Nothing |
+| Payments | Reads and deletes within their scope | Reads their own | Nothing |
+| `cancel`, `wall` endpoints | A membership within their scope, on this request's site | Their own | 404 |
+| `change`, `portal` endpoints | Never | Their own | 404 |
+
+Only the member changes their own plan or opens their own Stripe billing portal. A manager, even
+one who manages everything, gets a 404 on `change` and `portal`. Managers keep `cancel`.
+(Decided 2026-11-23.)
 
 Nobody creates memberships or payments directly: checkout and Stripe do. The member endpoints answer
 404, not 403, to anyone who may not use them, so they don't say whether a membership exists.
 
 Memberships' and payments' read access returns a query for members: the plugin's own "your rows"
-filter. What `canManage` returns is never passed to Payload, so an object that looks like a query
-can't widen it to every row. `canCheckout` follows the same rule: only `true` lets a checkout start,
-and anything else, an error included, refuses it with "Memberships are not available here yet."
-(503).
+filter. A manager's query comes only from `canManage`, and only when it passes the checks above.
+`canCheckout` follows the exact-`true` rule: only `true` lets a checkout start, and anything else,
+an error included, refuses it with "Memberships are not available here yet." (503).
+
+Upgrading: a `canManage` that returned `true` or `false` works as before. One that returned an object
+(it was a no) now has that object used as a query, so return `false` if you meant no.
 
 `overrides` can change a collection's `access`; if you do, your rules replace these.
 

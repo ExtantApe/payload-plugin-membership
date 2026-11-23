@@ -2,6 +2,15 @@
 
 Newest first.
 
+## 2026-11-23: managers limited to a set of rows
+
+Suite: 45 tests before, 61 after. Prompted by a security sweep: a manager of one site who was a member of another got manager rights there.
+
+- **The gap.** `canManage` was a yes or no, so a host with several sites couldn't limit managers per site (decisions entry of the same date).
+- **The change.** `canManage` may return a `Where`. `src/access.ts` resolves it (`managerScope`, `managerReaches`, `matchesWhere`, `viaMembership`) and every manager path uses it.
+- **Tests.** `test/manager-scope.test.ts` (no tenant plugin, so the answer is the only thing keeping a manager to a site): cross-site refusals on read, update, delete and create for memberships, payments, tiers; notes and Stripe fields per row; REST list, read, PATCH, DELETE; `cancel`, `wall`, `change`, `portal` across sites; member-only `change` and `portal`; the no answers; `true`; a Where that matches nothing. `membership.test.ts` and `multi-tenant.test.ts` updated for member-only `change` and `portal`, and the old "query-shaped object is a no" case became a Where.
+- **Skipped.** GraphQL over HTTP (`@payloadcms/graphql` isn't installed; same access functions as the Local API and REST cases).
+
 ## 2026-11-11: a throw from `scopeOf` is no site
 
 Suite: 43 tests before, 45 after. Closes the gap the entry below left for the lead.

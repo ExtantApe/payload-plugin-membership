@@ -193,7 +193,9 @@ describe('access and refusals', () => {
       expect((await hit(path, null, { id: String(bobs.id) })).status).toBe(404)
       expect((await hit(path, mallory, { id: String(bobs.id) })).status).toBe(404)
     }
-    const portal = await hit('/:id/portal', admin, { id: String(bobs.id) })
+    // Only the member opens their own billing portal; an admin gets a 404 (2026-11-23).
+    expect((await hit('/:id/portal', admin, { id: String(bobs.id) })).status).toBe(404)
+    const portal = await hit('/:id/portal', bob, { id: String(bobs.id) })
     expect(portal.status).toBe(200)
     expect(await portal.json()).toEqual({ url: `https://portal.example/cus_${bob.id}` })
   })
@@ -314,7 +316,12 @@ describe('only an exact yes from canManage or canCheckout (2026-11-11)', () => {
     ['1', () => 1],
     ["'yes'", () => 'yes'],
     ['{}', () => ({})],
-    ['a query-shaped object', () => ({ user: { exists: true } })],
+    ['null', () => null],
+    ['0', () => 0],
+    ["''", () => ''],
+    ['an empty and', () => ({ and: [] })],
+    ['an array', () => [{ user: { exists: true } }]],
+    ['a field with no operator', () => ({ user: {} })],
     ['a thrown error', () => {
       throw new Error('directory down')
     }],
@@ -407,8 +414,10 @@ describe('only an exact yes from canManage or canCheckout (2026-11-11)', () => {
       })
     }
     expect(((await payload.findByID({ collection: 'memberships' as never, id: bobs.id })) as Doc).wall?.name).not.toBe('Hijack')
+    // Even a manager of everything can't open a member's billing portal or change their plan (2026-11-23).
     await answering('canManage', () => true, async () => {
-      expect((await hit('/:id/portal', manager, { id: String(bobs.id) })).status).toBe(200)
+      for (const path of ['/:id/portal', '/:id/change']) expect((await hit(path, manager, { id: String(bobs.id), body: { tier: String(friend.id) } })).status, path).toBe(404)
+      expect((await hit('/:id/cancel', manager, { id: String(bobs.id) })).status).toBe(200)
     })
   })
 

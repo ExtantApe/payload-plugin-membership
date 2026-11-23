@@ -1,7 +1,12 @@
-import type { CollectionConfig, Payload, PayloadRequest } from 'payload'
+import type { CollectionConfig, Payload, PayloadRequest, Where } from 'payload'
 
-/** Who manages tiers, categories and memberships in the admin (default: nobody but overrideAccess code). */
-export type CanManage = (args: { req: PayloadRequest }) => boolean | Promise<boolean>
+/**
+ * Who manages tiers, categories and memberships in the admin (default: nobody but overrideAccess code).
+ * `true` is every row, a `Where` is only the rows it matches (e.g. `{ tenant: { equals: siteId } }`,
+ * written against the memberships collection and the `scopeField` of tiers and categories), anything
+ * else is no. An empty `{}` is no: return `true` for all.
+ */
+export type CanManage = (args: { req: PayloadRequest }) => boolean | Where | Promise<boolean | Where>
 
 export type Interval = 'month' | 'year'
 
@@ -60,7 +65,7 @@ export type MembershipPluginOptions = {
   slugs?: { tiers?: string; categories?: string; memberships?: string; payments?: string }
   /** The auth collection of members. Default: `admin.user` of your config. */
   users?: string
-  /** Who manages tiers, categories and memberships in the admin. Only `true` counts; anything else, or a throw, is a no. */
+  /** Who manages tiers, categories and memberships in the admin. `true` (all rows) or a `Where` (those rows only) counts; anything else, `{}` and a throw included, is a no. */
   canManage?: CanManage
   /** May members start memberships here right now (e.g. off in development)? Default: always. Only `true` allows it. */
   canCheckout?: (args: { payload: Payload }) => boolean | Promise<boolean>

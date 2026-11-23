@@ -1,7 +1,7 @@
 import type { Access, CollectionBeforeChangeHook, CollectionConfig, FieldAccess, Where } from 'payload'
 import { generateKeyBetween } from 'payload/shared'
 
-import { isManager } from './access.js'
+import { managerReaches, managerScope, matchesWhere, viaMembership } from './access.js'
 import type { ResolvedMembership } from './types.js'
 
 const idOf = (v: unknown) => (v && typeof v === 'object' ? String((v as { id: unknown }).id) : v ? String(v) : null)
@@ -34,13 +34,55 @@ const placeAlphabetically =
     return data
   }
 
+type Via = (w: Where) => Where
+
+/**
+ * Manager access by `canManage`'s answer: `true` is every row, a query is only the rows it matches
+ * (`via` rewrites it for a collection that holds the rows indirectly), anything else is no. A new
+ * row (`create`) must match the query in its own data.
+ */
+function scopedManager(o: ResolvedMembership, via: Via = (w) => w) {
+  const rows =
+    (): Access =>
+    async ({ req }) => {
+      const scope = await managerScope(o, req)
+      return scope === true ? true : scope ? via(scope) : false
+    }
+  const create: Access = async ({ req, data }) => {
+    const scope = await managerScope(o, req)
+    return scope === true || (scope !== null && matchesWhere(scope, data))
+  }
+  return { create, update: rows(), remove: rows() }
+}
+
+/** Managers read what `canManage` reaches and members their own rows; anyone else gets nothing. */
+function ownOrScoped(o: ResolvedMembership, via: Via = (w) => w): Access {
+  return async ({ req }) => {
+    if (!req.user) return false
+    const own = { user: { equals: req.user.id } } satisfies Where
+    const scope = await managerScope(o, req)
+    if (scope === true) return true
+    return scope ? ({ or: [via(scope), own] } satisfies Where) : own
+  }
+}
+
+/** Field access for managers: judged on the particular row, never on a bare yes. */
+function managerFieldOn(o: ResolvedMembership, collection: string): FieldAccess {
+  return async ({ req, id, doc, data }) => {
+    const scope = await managerScope(o, req)
+    if (scope === true) return true
+    if (!scope) return false
+    const rowId = id ?? (doc as { id?: unknown } | undefined)?.id
+    return rowId != null ? managerReaches(o, req, collection, rowId) : matchesWhere(scope, data)
+  }
+}
+
 const money = (name: string, label: string, description: string) =>
   ({ name, label, type: 'number' as const, min: 0, admin: { description: `${description} In cents (e.g. 500 = 5.00).` } })
 
 export function tiersCollection(o: ResolvedMembership): CollectionConfig {
-  // Only an exact `true` from `canManage` makes a manager; a truthy value or a thrown error is a no.
-  const manager: Access = ({ req }) => isManager(o, req)
-  const managerField: FieldAccess = ({ req }) => isManager(o, req)
+  const { create, update, remove } = scopedManager(o)
+  const managerField = managerFieldOn(o, o.tiers)
   return {
     slug: o.tiers,
     labels: { singular: 'Membership tier', plural: 'Membership tiers' },
@@ -49,7 +91,7 @@ export function tiersCollection(o: ResolvedMembership): CollectionConfig {
       defaultColumns: ['name', 'monthly', 'yearly', 'active'],
       description: 'Fixed-price levels (Patreon-style). Shown in this order: drag rows to change it.',
     },
-    access: { read: () => true, create: manager, update: manager, delete: manager },
+    access: { read: () => true, create, update, delete: remove },
     orderable: true,
     defaultSort: '_order',
     hooks: { beforeChange: [placeAlphabetically(o, o.tiers, 'name')] },
@@ -74,9 +116,8 @@ export function tiersCollection(o: ResolvedMembership): CollectionConfig {
 }
 
 export function categoriesCollection(o: ResolvedMembership): CollectionConfig {
-  // Only an exact `true` from `canManage` makes a manager; a truthy value or a thrown error is a no.
-  const manager: Access = ({ req }) => isManager(o, req)
-  const managerField: FieldAccess = ({ req }) => isManager(o, req)
+  const { create, update, remove } = scopedManager(o)
+  const managerField = managerFieldOn(o, o.categories)
   return {
     slug: o.categories,
     labels: { singular: 'Membership category', plural: 'Membership categories' },
@@ -85,7 +126,7 @@ export function categoriesCollection(o: ResolvedMembership): CollectionConfig {
       defaultColumns: ['name', 'parent', 'minimum', 'active'],
       description: 'What members can choose to support, setting their own amount (A–Z for new ones; drag to reorder). Add your own fields to tie categories to anything.',
     },
-    access: { read: () => true, create: manager, update: manager, delete: manager },
+    access: { read: () => true, create, update, delete: remove },
     orderable: true,
     defaultSort: '_order',
     hooks: { beforeChange: [placeAlphabetically(o, o.categories, 'name')] },
@@ -109,15 +150,10 @@ export function categoriesCollection(o: ResolvedMembership): CollectionConfig {
 }
 
 export function membershipsCollection(o: ResolvedMembership): CollectionConfig {
-  // Only an exact `true` from `canManage` makes a manager; a truthy value or a thrown error is a no.
-  const manager: Access = ({ req }) => isManager(o, req)
-  const managerField: FieldAccess = ({ req }) => isManager(o, req)
-  // Managers read all; members read their own (the plugin's own query, never the site's answer).
-  const ownOrManager: Access = async ({ req }) => {
-    if (!req.user) return false
-    if (await isManager(o, req)) return true
-    return { user: { equals: req.user.id } } satisfies Where
-  }
+  const { update, remove } = scopedManager(o)
+  const managerField = managerFieldOn(o, o.memberships)
+  // A manager reads what `canManage` reaches; members read their own (the plugin's own query, never the site's answer).
+  const ownOrManager = ownOrScoped(o)
   const nobody = () => false
   return {
     slug: o.memberships,
@@ -128,7 +164,7 @@ export function membershipsCollection(o: ResolvedMembership): CollectionConfig {
       description: 'Members’ subscriptions. Created and updated by checkout and Stripe; edit the wall name or notes here.',
     },
     // Created by checkout and updated by Stripe webhooks; members manage theirs through the plugin's endpoints.
-    access: { read: ownOrManager, create: nobody, update: manager, delete: manager },
+    access: { read: ownOrManager, create: nobody, update, delete: remove },
     fields: [
       { name: 'label', type: 'text', admin: { readOnly: true } },
       { name: 'user', type: 'relationship', relationTo: o.users as never, required: true, index: true, admin: { readOnly: true } },
@@ -222,19 +258,13 @@ export function membershipsCollection(o: ResolvedMembership): CollectionConfig {
 }
 
 export function paymentsCollection(o: ResolvedMembership): CollectionConfig {
-  // Only an exact `true` from `canManage` makes a manager; a truthy value or a thrown error is a no.
-  const manager: Access = ({ req }) => isManager(o, req)
-  // Managers read all; members read their own (the plugin's own query, never the site's answer).
-  const ownOrManager: Access = async ({ req }) => {
-    if (!req.user) return false
-    if (await isManager(o, req)) return true
-    return { user: { equals: req.user.id } } satisfies Where
-  }
+  const { remove } = scopedManager(o, viaMembership)
+  const ownOrManager = ownOrScoped(o, viaMembership)
   return {
     slug: o.payments,
     labels: { singular: 'Membership payment', plural: 'Membership payments' },
     admin: { useAsTitle: 'invoiceId', defaultColumns: ['membership', 'amount', 'currency', 'paidAt'], description: 'Every paid invoice, recorded once from Stripe.' },
-    access: { read: ownOrManager, create: () => false, update: () => false, delete: manager },
+    access: { read: ownOrManager, create: () => false, update: () => false, delete: remove },
     fields: [
       { name: 'membership', type: 'relationship', relationTo: o.memberships as never, required: true, index: true },
       { name: 'user', type: 'relationship', relationTo: o.users as never, required: true, index: true },

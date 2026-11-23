@@ -1,6 +1,6 @@
 import type { CollectionSlug, Endpoint, PayloadRequest } from 'payload'
 
-import { isManager } from './access.js'
+import { managerReaches } from './access.js'
 import { cancelMembership, changeMembership, handleStripeEvent, membershipOf, portalLink, startCheckout } from './api.js'
 
 const json = (body: unknown, status = 200) => Response.json(body, { status })
@@ -32,12 +32,12 @@ async function siteOf(req: PayloadRequest): Promise<string | null> {
 const idOf = (v: unknown) => (v && typeof v === 'object' ? String((v as { id: unknown }).id) : v ? String(v) : null)
 
 /**
- * The member's own membership, or one a manager may read, on this request's site only.
- * Managers go through the collection's read access (so a multi-tenant host's tenant rules
- * apply); with `scopeField` and `scopeOf`, a membership from another site, or asked for from
- * an unknown site, is not found.
+ * The member's own membership, or (unless `memberOnly`) one a manager may reach, on this request's
+ * site only. A manager is checked against this very row with `canManage`'s answer: `true` reaches
+ * every row, a query only the rows it matches. With `scopeField` and `scopeOf`, a membership from
+ * another site, or asked for from an unknown site, is not found.
  */
-async function ownMembership(req: PayloadRequest) {
+async function ownMembership(req: PayloadRequest, { memberOnly = false } = {}) {
   const o = membershipOf(req.payload)
   if (!req.user) return null
   const id = String(req.routeParams?.id ?? '')
@@ -49,7 +49,9 @@ async function ownMembership(req: PayloadRequest) {
     if (here == null || idOf((m as Record<string, unknown>)[o.scopeField]) !== String(here)) return null
   }
   if (idOf(m.user) === String(req.user.id)) return m
-  if (!(await isManager(o, req))) return null
+  if (memberOnly) return null
+  if (!(await managerReaches(o, req, o.memberships, m.id))) return null
+  // And the collection's own read access, so rules the host added there (a tenant plugin's, say) apply too.
   const visible = await req.payload.count({ collection, where: { id: { equals: m.id } }, overrideAccess: false, user: req.user, req })
   return visible.totalDocs > 0 ? m : null
 }
@@ -81,12 +83,12 @@ export const checkoutEndpoint: Endpoint = {
   },
 }
 
-/** POST /api/<memberships>/:id/change { tier? | pledges? } */
+/** POST /api/<memberships>/:id/change { tier? | pledges? }: the member's own only. */
 export const changeEndpoint: Endpoint = {
   path: '/:id/change',
   method: 'post',
   handler: async (req) => {
-    const m = await ownMembership(req)
+    const m = await ownMembership(req, { memberOnly: true })
     if (!m) return json({ error: 'Not found.' }, 404)
     try {
       const b = await body(req)
@@ -112,12 +114,12 @@ export const cancelEndpoint: Endpoint = {
   },
 }
 
-/** POST /api/<memberships>/:id/portal { returnPath? } → { url } (Stripe customer portal). */
+/** POST /api/<memberships>/:id/portal { returnPath? } → { url } (Stripe customer portal): the member's own only. */
 export const portalEndpoint: Endpoint = {
   path: '/:id/portal',
   method: 'post',
   handler: async (req) => {
-    const m = await ownMembership(req)
+    const m = await ownMembership(req, { memberOnly: true })
     if (!m) return json({ error: 'Not found.' }, 404)
     try {
       const b = await body(req)
