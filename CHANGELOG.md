@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-11-26)
 
 ### Changed (breaking for hosts that return an object from `canManage`)
 

@@ -1,6 +1,6 @@
 {
   "name": "@extantape/payload-plugin-membership",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Memberships for Payload: Patreon-style tiers or pick-your-own-amount pledges to categories, billed as Stripe subscriptions, with a backers wall and hooks for perks.",
   "homepage": "https://github.com/ExtantApe/payload-plugin-membership#readme",
   "bugs": {
