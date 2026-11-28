@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-11-28)
+
+### Requires Payload 3.94.2 or later (breaking for hosts on older Payload)
+
+- The `payload` peer range is now `^3.94.2` (it was `^3.80.0`). A host on an older Payload must upgrade Payload to 3.94.2 or later before installing this version.
 
 ### Changed (breaking for hosts that write `stripeProduct` outside server code)
 
@@ -19,7 +23,7 @@
 - Saved versions of all four collections are read by managers, a limited manager only within their `Where` (REST `versions` routes, GraphQL version queries, `findVersions` and `findVersionByID`). Versions a host turns on through `overrides` are covered, and if `overrides` replace `access` without `readVersions`, the plugin's rule is put back. A host that sets `readVersions` keeps its own.
 - A server duplicate of a membership starts as `pending` with no Stripe ids, dates or cancel flags, no staff `notes`, and off the backers wall. Server code can pass any of them in `data`.
 
-**Upgrade from 0.2.0.** Run once from server code: clear any stored `stripeProduct` that more than one row holds or whose Stripe metadata doesn't name its own row, and find categories whose parent is outside their own scope, in each locale if you localize it, and fix them. Make sure saves send plain field names. Use Payload 3.94.2 or later. The README has the steps.
+**Upgrade from 0.2.0.** Run once from server code: clear any stored `stripeProduct` that more than one row holds or whose Stripe metadata doesn't name its own row, and find categories whose parent is outside their own scope, in each locale if you localize it, and fix them. Make sure saves send plain field names. Upgrade Payload to 3.94.2 or later first, since this version requires it. The README has the steps.
 
 ### Tested
 
@@ -27,11 +31,11 @@
 - `test/upgrade.test.ts` (3 tests): rows written straight to the database in the 0.2.0 shape, read and edited with this version, plus the README's product clean-up (against a fake Stripe product list) and the parent fix.
 - `test/stripe-product.test.ts` against an in-memory MongoDB and a fake Stripe, on a plain host and on one with localization (the field localized too) and drafts turned on through `overrides`: create, update (single and bulk) and duplicate through the Local API with access on and REST, by a site manager and an all-rows manager, with and without data, with per-locale values; duplicate by server code; server create, update and a value passed to duplicate; checkout giving a copy its own product once and reusing it.
 - `test/version-reads.test.ts` (6 tests) on a host with two locales, versions on all four collections, a localized category parent, and a payments override that rebuilds `access`: version reads through REST (list and by id), GraphQL (list and by id) and the Local API for two members, a signed-out caller, a limited manager of each site and an all-site manager; restores by a member and a signed-out caller; the localized parent on duplicate (Local API and REST), update (one locale and all), restore, after clearing a locale, and by server code. Removing each part of the change (the rule put back after `overrides`, the version query rewrite, the per-locale check, the server-code mark) makes at least one test fail.
-- 129 tests in 8 files, run twice, plus typecheck, build and the leak check, on Payload 3.92.1.
+- 129 tests in 8 files, run twice, plus typecheck, build, the leak check and `npm pack --dry-run`, on Payload 3.94.2 (with `@payloadcms/db-mongodb`, `@payloadcms/graphql` and `@payloadcms/plugin-multi-tenant` 3.94.2) and Node 26.13.0.
 
 ### Not tested
 
-- GraphQL over HTTP (only in-process), the admin UI in a browser (including its version history view for managers), real Stripe, database adapters other than MongoDB, Payload versions other than 3.92.1 (an earlier run of the suite passed once on 3.94.2 in a scratch copy), a host that sets `readVersions` itself, an upgrade of a real 0.2.0 database (only rows written in its shape), and restoring a membership by a manager (it fails validation, unchanged).
+- GraphQL over HTTP (only in-process), the admin UI in a browser (including its version history view for managers), real Stripe, database adapters other than MongoDB, Payload versions other than 3.94.2, Node versions other than 26.13.0, a host that sets `readVersions` itself, an upgrade of a real 0.2.0 database (only rows written in its shape), and restoring a membership by a manager (it fails validation, unchanged).
 
 ## 0.2.0 (2026-11-26)
 

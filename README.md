@@ -32,6 +32,8 @@ Patreon, or let members support **categories** with **their own amount** — or 
 
 ## Install
 
+Requires Payload 3.94.2 or later.
+
 ```bash
 npm install @extantape/payload-plugin-membership
 ```
@@ -223,7 +225,8 @@ Upgrading from 0.2.0, checks to run once from server code:
    manager can't save such a category until its parent is cleared or moved into their scope, so fix
    these from server code or as a manager of every row.
 
-Use Payload 3.94.2 or later.
+This version requires Payload 3.94.2 or later (peer range `^3.94.2`). Upgrade Payload before you
+install it.
 
 Saves to these collections, from your front end, scripts and server code alike, must use plain field
 names (no leading dollar sign, no dots). Nested fields go as nested objects.

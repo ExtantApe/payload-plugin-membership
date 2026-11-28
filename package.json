@@ -1,6 +1,6 @@
 {
   "name": "@extantape/payload-plugin-membership",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Memberships for Payload: Patreon-style tiers or pick-your-own-amount pledges to categories, billed as Stripe subscriptions, with a backers wall and hooks for perks.",
   "homepage": "https://github.com/ExtantApe/payload-plugin-membership#readme",
   "bugs": {
@@ -51,16 +51,16 @@
     "stripe": "^23.1.0"
   },
   "peerDependencies": {
-    "payload": "^3.80.0"
+    "payload": "^3.94.2"
   },
   "devDependencies": {
-    "@payloadcms/db-mongodb": "3.92.1",
-    "@payloadcms/graphql": "3.92.1",
-    "@payloadcms/plugin-multi-tenant": "3.92.1",
+    "@payloadcms/db-mongodb": "3.94.2",
+    "@payloadcms/graphql": "3.94.2",
+    "@payloadcms/plugin-multi-tenant": "3.94.2",
     "@types/node": "^24.0.0",
     "graphql": "^16.14.2",
     "mongodb-memory-server": "^11.3.0",
-    "payload": "3.92.1",
+    "payload": "3.94.2",
     "typescript": "^5.9.0",
     "vitest": "^5.1.0"
   }
