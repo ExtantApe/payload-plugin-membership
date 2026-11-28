@@ -2,6 +2,14 @@
 
 Newest first.
 
+## 2026-11-28: the 0.3.0 release and the Payload 3.94.2 floor
+
+Suite: 129 tests in 8 files. The release commit changed the version, the peer range, the development dependencies, the lockfile, the CHANGELOG and the README. It changed no source or test file.
+
+Covered: the full suite twice on Payload 3.94.2 with Node 26.13.0, in an engineer's run and again in an independent review, plus typecheck, build, the leak check and `npm pack --dry-run`. CI passed on Node 24. The tests use an in-memory MongoDB and a fake Stripe.
+
+Gaps skipped: no test checks the peer range itself, which the package manager reads from `package.json`. Also not tested: Payload versions after 3.94.2, GraphQL over HTTP, the admin UI in a browser, real Stripe, other database adapters, and an upgrade of a real 0.2.0 database (`upgrade.test.ts` uses made-up rows in the 0.2.0 shape).
+
 ## 2026-11-27: version reads, localized parents, membership copies
 
 Covered: saved versions of all four collections read only by managers in scope, through REST list and by id, GraphQL list and by id and the Local API, for members, signed-out callers, a limited manager of each site and an all-site manager, on a host that turns versions on through `overrides` and on one whose override rebuilds `access`; restores refused for a member and a signed-out caller; a limited manager reads full versions inside their scope; a localized category parent judged in every locale on duplicate (Local API and REST), update (one locale and all), restore, after a locale is cleared, and left alone for server code acting for a manager; a server copy of a membership without staff notes or the wall choice. Mutations, each restored and checked by SHA: no rule after `overrides` (2 fail), no version query rewrite (2 fail), no per-locale check (1 fails), no server-code mark (1 fails), no duplicate reset for notes and wall (1 fails).

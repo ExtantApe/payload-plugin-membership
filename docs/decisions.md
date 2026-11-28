@@ -25,3 +25,9 @@ Decided:
 - The rule is put back after `overrides` when the host's `access` has none, so turning versions on or rebuilding `access` keeps the rule. A host that sets `readVersions` keeps its own.
 - When a host localizes a category's `parent`, every locale's final parent is checked. Payload doesn't tell a `beforeChange` field hook whether access is overridden, so the `beforeValidate` hook marks server-code saves; an unmarked save is checked, which can only refuse more.
 - A server copy of a membership starts without staff notes and off the backers wall, like its Stripe ids and dates. Server code passes values in `data` to keep them.
+
+## 2026-11-28: release 0.3.0 and require Payload 3.94.2
+
+- Owner decision (D342): "Release it (Recommended)", "0.3.0 (Recommended)", "Push now (Recommended)", "Raise peer to ^3.94.2".
+- The `payload` peer range is `^3.94.2`. It was `^3.80.0`. This breaks installs on an older Payload, so the CHANGELOG and README say a host must upgrade Payload first.
+- npm publishing still waits for the owner's approval of the staged release.
