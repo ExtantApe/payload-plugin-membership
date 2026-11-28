@@ -107,6 +107,19 @@ export function viaMembership(where: Where): Where {
   return out as Where
 }
 
+/**
+ * The query as it applies to a collection's saved versions, where every field sits under `version`
+ * and the row's own id is `parent`.
+ */
+export function inVersions(where: Where): Where {
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(where)) {
+    if (k === 'and' || k === 'or') out[k] = (v as Where[]).map(inVersions)
+    else out[k === 'id' ? 'parent' : `version.${k}`] = v
+  }
+  return out as Where
+}
+
 const idOf = (v: unknown): unknown => (v && typeof v === 'object' && 'id' in v ? (v as { id: unknown }).id : v)
 const same = (a: unknown, b: unknown) => a != null && b != null && String(idOf(a)) === String(idOf(b))
 

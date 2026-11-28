@@ -1,7 +1,8 @@
-import type { Access, CollectionBeforeChangeHook, CollectionConfig, CollectionSlug, FieldAccess, Where } from 'payload'
+import { APIError } from 'payload'
+import type { Access, CollectionBeforeChangeHook, CollectionConfig, CollectionSlug, Field, FieldAccess, FieldHook, PayloadRequest, Where } from 'payload'
 import { generateKeyBetween } from 'payload/shared'
 
-import { managerReaches, managerScope, matchesWhere, viaMembership } from './access.js'
+import { inVersions, managerReaches, managerScope, matchesWhere, viaMembership } from './access.js'
 import type { ResolvedMembership } from './types.js'
 
 const idOf = (v: unknown) => (v && typeof v === 'object' ? String((v as { id: unknown }).id) : v ? String(v) : null)
@@ -36,6 +37,22 @@ const placeAlphabetically =
 
 /** No write through the API for anyone: only the plugin's own server code (with overrideAccess) changes these. */
 const LOCKED = { update: () => false }
+
+/**
+ * The Stripe product of a tier or category, created at its first checkout (prices are set per member).
+ * Only server code (`overrideAccess`) writes it. It belongs to one row, so a duplicate starts without
+ * it, whoever makes the copy. `null` is deliberate: Payload ignores `undefined` from this hook.
+ */
+const stripeProductField = (read: FieldAccess): Field => ({
+  name: 'stripeProduct',
+  type: 'text',
+  access: { read, create: () => false, update: () => false },
+  hooks: { beforeDuplicate: [() => null] },
+  admin: { position: 'sidebar', readOnly: true },
+})
+
+/** A copy of a membership is a new, unpaid row: these start empty, whoever makes the copy (`null`: Payload ignores `undefined`). The staff notes and the member's wall choice start empty too. */
+const fresh = (value: unknown = null) => ({ beforeDuplicate: [() => value] })
 
 /** Only the member whose row it is. */
 const memberOnly: FieldAccess = ({ req, doc }) => Boolean(req.user) && String(idOf((doc as { user?: unknown } | undefined)?.user)) === String(req.user!.id)
@@ -106,12 +123,120 @@ function ownOrScoped(o: ResolvedMembership, via: Via = (w) => w): Access {
   }
 }
 
+/**
+ * Who reads saved versions (REST, GraphQL and the Local API's `findVersions`): managers only, a
+ * limited manager only versions inside their scope. Members and signed-out callers get none. Payload
+ * applies this to the versions collection as is, so the scope is rewritten for it (`version.<field>`, `parent` for the id) and run once; a
+ * scope that doesn't run there is no.
+ */
+export function managersReadVersions(o: ResolvedMembership, collection: string, via: Via = (w) => w): Access {
+  return async ({ req }) => {
+    const scope = await managerScope(o, req)
+    if (scope === true) return true
+    if (!scope) return false
+    const where = inVersions(via(scope))
+    const checked = ((req.context as Record<string, unknown>).membershipVersionWhereChecked ??= new Map<string, boolean>()) as Map<string, boolean>
+    const key = `${collection}:${JSON.stringify(where)}`
+    let ok = checked.get(key)
+    if (ok === undefined) {
+      try {
+        await req.payload.countVersions({ collection: collection as CollectionSlug, where, overrideAccess: true, req })
+        ok = true
+      } catch {
+        ok = false
+      }
+      checked.set(key, ok)
+    }
+    return ok ? where : false
+  }
+}
+
+const localeCodes = (req: PayloadRequest): string[] => (req.payload.config.localization ? req.payload.config.localization.localeCodes : [])
+
+/** A value sent with every locale at once (`locale: 'all'`): one value per locale code. */
+const perLocale = (value: unknown, req: PayloadRequest): Record<string, unknown> | null =>
+  req.locale === 'all' && localeCodes(req).length && value && typeof value === 'object' && !Array.isArray(value) && !('id' in value) ? (value as Record<string, unknown>) : null
+
+/** The parent ids in a value, each locale's when it holds one per locale. Anything that isn't a locale code counts as an id too. */
+function parentIds(value: unknown, req: PayloadRequest): string[] {
+  const each = perLocale(value, req)
+  const values = each ? Object.values(each) : [value]
+  return values.filter((v) => v != null && v !== '').map((v) => String(idOf(v)))
+}
+
 /** A relationship may only be set to a row the manager reaches (nothing to check when it isn't being set). */
 function inScope(o: ResolvedMembership, target: string): FieldAccess {
   return async ({ req, siblingData, data }) => {
     const sent = (siblingData as Record<string, unknown> | undefined)?.parent ?? (data as Record<string, unknown> | undefined)?.parent
-    if (sent == null || sent === '') return true
-    return managerReaches(o, req, target, idOf(sent))
+    for (const id of parentIds(sent, req)) if (!(await managerReaches(o, req, target, id))) return false
+    return true
+  }
+}
+
+const PARENT_REFUSED = 'The parent category is outside what you manage. Choose a category you manage, or clear the parent.'
+
+/**
+ * Saves made by server code (`overrideAccess`), marked in `beforeValidate`, the only field hook
+ * Payload tells. The mark is the document both phases share; a missing mark only means the save is
+ * checked as though it came from a manager.
+ */
+const unchecked = new WeakSet<object>()
+
+/**
+ * The parent a category ends up with must be one the manager reaches, whether it was sent, kept
+ * from the existing row, copied by a duplicate or brought back by restoring a version. Runs as a
+ * field `beforeValidate` hook, where Payload has already merged those in, and refuses rather than
+ * dropping the value so the manager knows why. Server code (`overrideAccess`) isn't checked.
+ */
+function parentInScope(o: ResolvedMembership, target: string): FieldHook {
+  return async ({ originalDoc, overrideAccess, req, value }) => {
+    if (overrideAccess) {
+      if (originalDoc && typeof originalDoc === 'object') unchecked.add(originalDoc)
+      return value
+    }
+    for (const id of parentIds(value, req)) if (!(await managerReaches(o, req, target, id))) throw new APIError(PARENT_REFUSED, 403, undefined, true)
+    return value
+  }
+}
+
+/**
+ * When a host localizes the parent, a save in one locale keeps the other locales' parents, and a
+ * duplicate or restore carries them all. Each locale's final parent is worked out the way Payload
+ * merges locales (the value sent for the current locale, or for each locale sent with `all`, and the
+ * stored value for every other locale), and every one must be reachable.
+ */
+function everyLocaleInScope(o: ResolvedMembership, target: string): FieldHook {
+  return async ({ field, originalDoc, req, siblingDocWithLocales, value }) => {
+    if (originalDoc && typeof originalDoc === 'object' && unchecked.has(originalDoc)) return value
+    const codes = localeCodes(req)
+    if (!('localized' in field && field.localized) || !codes.length) return value
+    const scope = await managerScope(o, req)
+    if (scope === true || !scope) return value // no scope at all is refused by access
+    const existing = ((siblingDocWithLocales as Record<string, unknown> | undefined)?.[(field as { name: string }).name] ?? {}) as Record<string, unknown>
+    const sentAll = perLocale(value, req)
+    for (const code of codes) {
+      const sent = sentAll ? sentAll[code] : code === req.locale ? value : undefined
+      const final = sent === undefined ? existing[code] : sent
+      if (final == null || final === '') continue
+      if (!(await managerReaches(o, req, target, idOf(final)))) throw new APIError(PARENT_REFUSED, 403, undefined, true)
+    }
+    return value
+  }
+}
+
+/**
+ * Who reads tiers and categories. Everyone, as the plugin ships. If a host turns on drafts through
+ * `overrides`, only managers see unpublished rows (a limited manager only in their scope); anyone
+ * else sees published rows.
+ */
+function publicRead(o: ResolvedMembership, slug: string): Access {
+  return async ({ req }) => {
+    const versions = req.payload.collections[slug as CollectionSlug]?.config.versions
+    if (!(versions && typeof versions === 'object' && versions.drafts)) return true
+    const published: Where = { or: [{ _status: { equals: 'published' } }, { _status: { exists: false } }] }
+    const scope = await managerScope(o, req)
+    if (scope === true) return true
+    return scope ? { or: [published, scope] } : published
   }
 }
 
@@ -140,7 +265,7 @@ export function tiersCollection(o: ResolvedMembership): CollectionConfig {
       defaultColumns: ['name', 'monthly', 'yearly', 'active'],
       description: 'Fixed-price levels (Patreon-style). Shown in this order: drag rows to change it.',
     },
-    access: { read: () => true, create, update, delete: remove },
+    access: { read: publicRead(o, o.tiers), readVersions: managersReadVersions(o, o.tiers), create, update, delete: remove },
     orderable: true,
     defaultSort: '_order',
     hooks: { beforeChange: [placeAlphabetically(o, o.tiers, 'name')] },
@@ -157,8 +282,7 @@ export function tiersCollection(o: ResolvedMembership): CollectionConfig {
         type: 'checkbox',
         admin: { position: 'sidebar', description: 'A perk your site can act on in onStatusChange (e.g. with payload-plugin-sponsors).' },
       },
-      // Stripe product for this tier/category (created on first checkout; prices are set per member).
-      { name: 'stripeProduct', type: 'text', access: { read: managerField, create: managerField, update: managerField }, admin: { position: 'sidebar', readOnly: true } },
+      stripeProductField(managerField),
     ],
     timestamps: true,
   }
@@ -175,14 +299,14 @@ export function categoriesCollection(o: ResolvedMembership): CollectionConfig {
       defaultColumns: ['name', 'parent', 'minimum', 'active'],
       description: 'What members can choose to support, setting their own amount (A–Z for new ones; drag to reorder). Add your own fields to tie categories to anything.',
     },
-    access: { read: () => true, create, update, delete: remove },
+    access: { read: publicRead(o, o.categories), readVersions: managersReadVersions(o, o.categories), create, update, delete: remove },
     orderable: true,
     defaultSort: '_order',
     hooks: { beforeChange: [placeAlphabetically(o, o.categories, 'name')] },
     fields: [
       { name: 'name', type: 'text', required: true },
       { name: 'active', label: 'Open to new pledges', type: 'checkbox', defaultValue: true, admin: { position: 'sidebar' } },
-      { name: 'parent', type: 'relationship', relationTo: o.categories as never, access: { create: inScope(o, o.categories), update: inScope(o, o.categories) }, admin: { position: 'sidebar', description: 'Optional: nest under a broader category.' } },
+      { name: 'parent', type: 'relationship', relationTo: o.categories as never, access: { create: inScope(o, o.categories), update: inScope(o, o.categories) }, hooks: { beforeValidate: [parentInScope(o, o.categories)], beforeChange: [everyLocaleInScope(o, o.categories)] }, admin: { position: 'sidebar', description: 'Optional: nest under a broader category.' } },
       { name: 'description', type: 'textarea' },
       money('minimum', 'Minimum per month', 'Smallest monthly amount for this category (yearly: 12×).'),
       {
@@ -191,8 +315,7 @@ export function categoriesCollection(o: ResolvedMembership): CollectionConfig {
         admin: { description: 'Off: the category is the member’s preference. On: pledges are reserved for work in this category (say so on your page).' },
       },
       { name: 'color', type: 'text', admin: { position: 'sidebar' } },
-      // Stripe product for this tier/category (created on first checkout; prices are set per member).
-      { name: 'stripeProduct', type: 'text', access: { read: managerField, create: managerField, update: managerField }, admin: { position: 'sidebar', readOnly: true } },
+      stripeProductField(managerField),
     ],
     timestamps: true,
   }
@@ -213,7 +336,7 @@ export function membershipsCollection(o: ResolvedMembership): CollectionConfig {
       description: 'Members’ subscriptions. Created and updated by checkout and Stripe; edit the wall name or notes here.',
     },
     // Created by checkout and updated by Stripe webhooks; members manage theirs through the plugin's endpoints.
-    access: { read: ownOrManager, create: nobody, update, delete: remove },
+    access: { read: ownOrManager, readVersions: managersReadVersions(o, o.memberships), create: nobody, update, delete: remove },
     fields: [
       { name: 'label', type: 'text', access: LOCKED, admin: { readOnly: true } },
       { name: 'user', type: 'relationship', relationTo: o.users as never, required: true, index: true, access: LOCKED, admin: { readOnly: true } },
@@ -228,6 +351,7 @@ export function membershipsCollection(o: ResolvedMembership): CollectionConfig {
             defaultValue: 'pending',
             index: true,
             access: LOCKED,
+            hooks: fresh('pending'),
             options: ['pending', 'incomplete', 'active', 'past_due', 'canceled'].map((v) => ({ label: v.replace('_', ' '), value: v })),
             admin: { width: '33%', readOnly: true },
           },
@@ -274,10 +398,10 @@ export function membershipsCollection(o: ResolvedMembership): CollectionConfig {
       {
         type: 'row',
         fields: [
-          { name: 'startedAt', type: 'date', access: LOCKED, admin: { width: '25%', readOnly: true } },
-          { name: 'currentPeriodEnd', type: 'date', access: LOCKED, admin: { width: '25%', readOnly: true } },
-          { name: 'cancelAtPeriodEnd', type: 'checkbox', access: LOCKED, admin: { width: '25%', readOnly: true } },
-          { name: 'canceledAt', type: 'date', access: LOCKED, admin: { width: '25%', readOnly: true } },
+          { name: 'startedAt', type: 'date', access: LOCKED, hooks: fresh(), admin: { width: '25%', readOnly: true } },
+          { name: 'currentPeriodEnd', type: 'date', access: LOCKED, hooks: fresh(), admin: { width: '25%', readOnly: true } },
+          { name: 'cancelAtPeriodEnd', type: 'checkbox', access: LOCKED, hooks: fresh(false), admin: { width: '25%', readOnly: true } },
+          { name: 'canceledAt', type: 'date', access: LOCKED, hooks: fresh(), admin: { width: '25%', readOnly: true } },
         ],
       },
       {
@@ -286,8 +410,8 @@ export function membershipsCollection(o: ResolvedMembership): CollectionConfig {
         type: 'group',
         admin: { description: 'Members choose whether and how they appear; nothing is public otherwise.' },
         fields: [
-          { name: 'show', label: 'Show on the backers wall', type: 'checkbox', defaultValue: false, access: { update: wallShow(o) } },
-          { name: 'name', label: 'Name on the wall', type: 'text', maxLength: 80, access: { update: memberOnly } },
+          { name: 'show', label: 'Show on the backers wall', type: 'checkbox', defaultValue: false, access: { update: wallShow(o) }, hooks: fresh(false) },
+          { name: 'name', label: 'Name on the wall', type: 'text', maxLength: 80, access: { update: memberOnly }, hooks: fresh() },
         ],
       },
       // Stripe references: managers only, never in public responses.
@@ -297,12 +421,12 @@ export function membershipsCollection(o: ResolvedMembership): CollectionConfig {
         access: { read: managerField, create: LOCKED.update, update: LOCKED.update },
         admin: { position: 'sidebar', readOnly: true },
         fields: [
-          { name: 'customer', type: 'text', index: true },
-          { name: 'subscription', type: 'text', index: true },
-          { name: 'checkoutSession', type: 'text', index: true },
+          { name: 'customer', type: 'text', index: true, hooks: fresh() },
+          { name: 'subscription', type: 'text', index: true, hooks: fresh() },
+          { name: 'checkoutSession', type: 'text', index: true, hooks: fresh() },
         ],
       },
-      { name: 'notes', type: 'textarea', access: { read: managerField, update: managerField }, admin: { position: 'sidebar' } },
+      { name: 'notes', type: 'textarea', access: { read: managerField, update: managerField }, hooks: fresh(), admin: { position: 'sidebar' } },
     ],
     timestamps: true,
   }
@@ -315,7 +439,7 @@ export function paymentsCollection(o: ResolvedMembership): CollectionConfig {
     slug: o.payments,
     labels: { singular: 'Membership payment', plural: 'Membership payments' },
     admin: { useAsTitle: 'invoiceId', defaultColumns: ['membership', 'amount', 'currency', 'paidAt'], description: 'Every paid invoice, recorded once from Stripe.' },
-    access: { read: ownOrManager, create: () => false, update: () => false, delete: remove },
+    access: { read: ownOrManager, readVersions: managersReadVersions(o, o.payments, viaMembership), create: () => false, update: () => false, delete: remove },
     fields: [
       { name: 'membership', type: 'relationship', relationTo: o.memberships as never, required: true, index: true },
       { name: 'user', type: 'relationship', relationTo: o.users as never, required: true, index: true },

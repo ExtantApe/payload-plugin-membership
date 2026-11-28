@@ -2,6 +2,29 @@
 
 Newest first.
 
+## 2026-11-27: version reads, localized parents, membership copies
+
+Covered: saved versions of all four collections read only by managers in scope, through REST list and by id, GraphQL list and by id and the Local API, for members, signed-out callers, a limited manager of each site and an all-site manager, on a host that turns versions on through `overrides` and on one whose override rebuilds `access`; restores refused for a member and a signed-out caller; a limited manager reads full versions inside their scope; a localized category parent judged in every locale on duplicate (Local API and REST), update (one locale and all), restore, after a locale is cleared, and left alone for server code acting for a manager; a server copy of a membership without staff notes or the wall choice. Mutations, each restored and checked by SHA: no rule after `overrides` (2 fail), no version query rewrite (2 fail), no per-locale check (1 fails), no server-code mark (1 fails), no duplicate reset for notes and wall (1 fails).
+
+The field-name tests use names of fields the collections don't define, and cover every write path.
+
+Gaps skipped: a host that sets its own `readVersions` (the plugin keeps it, by a one-line `??`), the admin UI's version view, GraphQL over HTTP, and real Stripe.
+
+## 2026-11-27: field names, parents on copies, restores, drafts
+
+Covered: field names with a dollar sign, a dot or a NUL refused for every write path, server code with `overrideAccess` included (Local single, bulk and draft; REST JSON and form data, single and bulk; create; duplicate), with a unit test for nesting, JSON and rich text values and the depth limit; GraphQL shown unable to send them; ordinary saves and server code unaffected; parent judged on the final value for duplicate, update and restore; restore scope for tiers, categories and memberships and a missing version; draft reads by role; membership duplicates reset; an upgrade from rows in the 0.2.0 shape with the README's clean-up steps. The guard was checked by removing it: its tests fail.
+
+Gaps skipped: real Stripe (fake only), the admin UI, GraphQL over HTTP, and a manager restoring a membership (it already fails validation; unchanged).
+
+## 2026-11-27: `stripeProduct` is set only by server code
+
+Suite: 69 tests before, 107 after.
+
+- **The promise.** `stripeProduct` on tiers and categories is written only by server code, and a duplicate starts without it.
+- **The change.** In `src/collections.ts` the two fields share one definition: create and update access are no, and a `beforeDuplicate` hook returns `null`.
+- **Tests.** `test/stripe-product.test.ts`, run on a plain host and on a host with localization (field localized) and drafts: manager create and update (single and bulk) and duplicate through the Local API and REST, with per-locale values and with and without data; server duplicate; server create, update and an explicit value on duplicate; checkout after a duplicate; managers still read the value in scope. Memberships and payments: a manager can't create or duplicate them. The checks read the stored record and, with drafts, the latest version. Without the duplicate hook alone, 8 fail.
+- **Skipped.** GraphQL over HTTP (`@payloadcms/graphql` isn't installed), the admin UI, real Stripe and other database adapters.
+
 ## 2026-11-23: managers limited to a set of rows
 
 Suite: 45 tests before, 69 after. Prompted by a security sweep: a manager of one site who was a member of another got manager rights there.
