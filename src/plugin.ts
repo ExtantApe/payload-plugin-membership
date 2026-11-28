@@ -1,7 +1,8 @@
-import type { Config, Plugin } from 'payload'
+import type { CollectionConfig, Config, Plugin } from 'payload'
 import Stripe from 'stripe'
 
 import { categoriesCollection, membershipsCollection, paymentsCollection, tiersCollection } from './collections.js'
+import { guarded } from './guard.js'
 import { cancelEndpoint, changeEndpoint, checkoutEndpoint, portalEndpoint, wallEndpoint, webhookEndpoint } from './endpoints.js'
 import type { MembershipPluginOptions, ResolvedMembership, StripeLike } from './types.js'
 
@@ -32,7 +33,14 @@ export const membershipPlugin =
       onPayment: options.onPayment,
       onStatusChange: options.onStatusChange,
     }
-    const apply = (c: ReturnType<typeof tiersCollection>, f?: (c: ReturnType<typeof tiersCollection>) => ReturnType<typeof tiersCollection>) => (f ? f(c) : c)
+    // The write guard goes on after the host's overrides, whatever they change. So does the rule for
+    // reading saved versions, since overrides can turn versions on or rebuild `access`. A host that
+    // sets `readVersions` itself keeps it.
+    const apply = (c: CollectionConfig, f?: (c: CollectionConfig) => CollectionConfig) => {
+      const out = f ? f(c) : c
+      const readVersions = out.access?.readVersions ?? c.access!.readVersions
+      return guarded(o, { ...out, access: { ...out.access, readVersions } })
+    }
     const memberships = membershipsCollection(o)
     memberships.endpoints = [checkoutEndpoint, webhookEndpoint, changeEndpoint, cancelEndpoint, portalEndpoint, wallEndpoint]
     return {

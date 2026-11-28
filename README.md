@@ -130,7 +130,7 @@ example a membership they hold as a member there).
 | Where | A manager | A signed-in member | Signed out |
 |---|---|---|---|
 | Tiers, categories | Reads; creates, edits, deletes within their scope | Reads | Reads |
-| Their `stripeProduct` (field) | Reads and writes within their scope | Never sees it | Never sees it |
+| Their `stripeProduct` (field) | Reads within their scope; never writes | Never sees it | Never sees it |
 | Memberships | Reads and edits within their scope, deletes within their scope | Reads their own | Nothing |
 | A membership's `stripe` and `notes` (fields) | Reads and writes within their scope | Never sees them | Nothing |
 | Payments | Reads and deletes within their scope | Reads their own | Nothing |
@@ -148,7 +148,48 @@ Payload's own REST, GraphQL or admin can't get around it. A manager can't write 
 `kind`, `status`, `interval`, `tier`, `pledges`, `amount`, `currency`, `label`, the period dates or the
 `stripe` group, or `wall.name`, and can only set `wall.show` to `false`. Only `notes` is theirs to edit.
 Server code that writes with `overrideAccess` (checkout, Stripe events) is unchanged. A manager can
-set a category's `parent` only to a category in their scope.
+set a category's `parent` only to a category in their scope. That is judged on the parent the row
+ends up with, whether the save is a create, an update, a duplicate (which keeps the original's parent
+unless the data changes it) or a restore. A save whose final parent is outside their scope is refused
+with a message saying so; clear the parent or choose one they manage. If you localize `parent` through
+`overrides`, every locale's parent counts: a save in one locale is refused while another locale's
+parent is outside their scope, until that locale's parent is cleared or moved.
+
+Saves to the plugin's collections send each field by its plain name, with nested fields as nested
+objects. A field name that starts with a dollar sign or contains a dot is refused (400) on every save,
+through any API, bulk updates, drafts and duplicates included, and from your server code with
+`overrideAccess` too, since the Local API overrides access by default. The values of JSON and rich
+text fields are left alone. The plugin puts this check at the front of each collection's
+`beforeOperation` hooks, after your `overrides`. A plugin that runs after this one can still add its
+own hook in front of it, so that hook sees the data before the check does.
+
+A manager limited by a `Where` may restore a version of a tier, category or membership only when the
+version itself matches their `Where`. A version that can't be read is refused. (Restoring a
+membership by anyone other than server code fails validation, as it did before, because the fields
+managers can't write aren't refilled on restore.)
+
+If you turn on drafts for tiers or categories through `overrides`, people who aren't managers read
+only published rows (and rows saved before drafts were on). A limited manager also reads drafts in
+their scope, and a manager of every row reads all of them.
+
+Saved versions are for managers only: the `versions` routes in REST, the version queries in GraphQL,
+and `findVersions` and `findVersionByID` in the Local API with access on. Members and signed-out
+visitors get none, and a limited manager gets only the versions that match their `Where`. This covers
+all four collections, versions you turn on through `overrides` included. If your `overrides` set
+`access.readVersions`, your rule is used. If they replace `access` without one, the plugin's rule is
+put back, so these collections always have a rule for versions.
+
+A server-side duplicate of a membership starts as `pending`, without Stripe ids, period dates,
+`canceledAt` or `cancelAtPeriodEnd`. It also starts without the staff `notes` and off the backers
+wall (`wall.show` false, no `wall.name`). Server code that wants any of these on the copy passes them
+in `data`.
+
+`stripeProduct` on tiers and categories is set only by server code (`overrideAccess`): the plugin
+stores it at a row's first checkout, and your own server code (a seed or an import) may set it on
+create or update. A create or update that doesn't override access ignores it. It belongs to one row,
+so a duplicate starts without it, in every locale, and gets its own at its first checkout. That
+includes a duplicate made by your server code. To give a copy a particular value, pass `stripeProduct`
+in the `data` of a duplicate that overrides access.
 
 Nobody creates memberships or payments directly: checkout and Stripe do. The member endpoints answer
 404, not 403, to anyone who may not use them, so they don't say whether a membership exists.
@@ -161,7 +202,34 @@ an error included, refuses it with "Memberships are not available here yet." (50
 Upgrading: a `canManage` that returned `true` or `false` works as before. One that returned an object
 (it was a no) now has that object used as a query, so return `false` if you meant no.
 
-`overrides` can change a collection's `access`; if you do, your rules replace these.
+Upgrading, `stripeProduct`: if anything other than server code writes it (the REST or GraphQL API, or
+the Local API with `overrideAccess: false`), move that write to server code with `overrideAccess`,
+after your own permission check. If your server code duplicates a tier or category and expects the
+copy to keep the value, pass it in `data`. Rows saved earlier keep what they hold, and checkout uses
+it, so check them: each value should be used by one row only, and a product the plugin created names
+its row in its Stripe metadata (`payloadCollection`, `payloadId`). Where a value belongs to another
+row, set it to `null` from server code (in each locale, if you localize the field). The next checkout
+creates the row's own product.
+
+Upgrading from 0.2.0, checks to run once from server code:
+
+1. Stored products. For each tier and category with a `stripeProduct`, clear it (set `null` with
+   `overrideAccess`, in each locale if you localize the field) when more than one row holds the same
+   value, or when the product's Stripe metadata `payloadCollection` and `payloadId` don't name this
+   collection and this row's id. Clear every row that shares a value, the first one too. The next
+   checkout makes each row its own product. Running it again should find nothing.
+2. Parent categories. If you use a `Where` for managers, list categories whose `parent` is outside the
+   category's own scope (on another site). If you localize `parent`, check it in each locale. A limited
+   manager can't save such a category until its parent is cleared or moved into their scope, so fix
+   these from server code or as a manager of every row.
+
+Use Payload 3.94.2 or later.
+
+Saves to these collections, from your front end, scripts and server code alike, must use plain field
+names (no leading dollar sign, no dots). Nested fields go as nested objects.
+
+`overrides` can change a collection's `access`; if you do, your rules replace these, except that a
+collection whose `access` has no `readVersions` keeps the plugin's.
 
 ## License
 
